@@ -120,8 +120,10 @@ else
 fi
 
 head_ "Exposure"
+# A published port renders with a host IP (e.g. "{0.0.0.0 80 8080 tcp}"); an
+# internal-only port has an empty host field ("{ 4000 0 tcp}").
 published=$(docker compose ps --format '{{.Service}} {{.Publishers}}' 2>/dev/null \
-  | grep -E '\-> ' | awk '{print $1}' | sort -u)
+  | grep -E '\{[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ' | awk '{print $1}' | sort -u)
 if [ -z "$published" ]; then
   printf '  \033[33m—\033[0m skipped port check (run from the compose project root)\n'
 elif [ "$published" = "proxy" ]; then
