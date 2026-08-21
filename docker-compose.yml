@@ -1,14 +1,14 @@
 services:
   api:
     build: ./api
-    ports:
-      - "4000:4000"
     environment:
       MONGO_URL: mongodb://mongo:27017
       REDIS_URL: redis://redis:6379
     depends_on:
       - mongo
       - redis
+    expose:
+      - "4000"  
   mongo:
     image: mongo:7
     volumes:
@@ -16,6 +16,18 @@ services:
   redis:
     image: redis:8
 
+  web:
+    build: ./web
+    expose:
+      - "80"
+
+  proxy:
+     build: ./proxy
+     ports:
+       - "8080:80"
+     depends_on:
+        - web
+        - api    
 networks:
   default:
     name: app_network
