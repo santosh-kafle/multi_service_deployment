@@ -1,19 +1,21 @@
 services:
   api:
     build: ./api
-    environment:
-      MONGO_URL: mongodb://mongo:27017
-      REDIS_URL: redis://redis:6379
     depends_on:
-      - mongo
-      - redis
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     expose:
       - "4000"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:4000/api/ready').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
       interval: 10s
       timeout: 5s
-      retries: 5    
+      retries: 5
+    env_file:
+      - ./api/.env    
+    restart: unless-stopped    
   mongo:
     image: mongo:7
     volumes:
@@ -23,6 +25,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5    
+    restart: unless-stopped  
   redis:
     image: redis:8
     command: ["redis-server", "--appendonly", "yes"]
@@ -33,6 +36,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped  
 
   web:
     build: ./web
@@ -42,20 +46,24 @@ services:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/"]
       interval: 10s
       timeout: 5s
-      retries: 5  
+      retries: 5 
+    restart: unless-stopped 
 
   proxy:
      build: ./proxy
      ports:
        - "8080:80"
      depends_on:
-        - web
-        - api
+       web:
+            condition: service_healthy
+       api:
+           condition: service_healthy
      healthcheck:
         test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/"]
         interval: 10s
         timeout: 5s
         retries: 5  
+     restart: unless-stopped 
 networks:
   default:
     name: app_network
