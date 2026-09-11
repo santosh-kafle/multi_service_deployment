@@ -13,30 +13,40 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    env_file:
-      - ./api/.env    
+    environment:
+      - NODE_ENV=${NODE_ENV}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - MONGO_URL=mongodb://${MONGO_ROOT_USERNAME}:${MONGO_ROOT_PASSWORD}@mongo:27017/${MONGO_DB}?authSource=admin
+      - MONGO_DB=${MONGO_DB}
+      - PORT=${PORT}
+      - CACHE_TTL_SECONDS=${CACHE_TTL_SECONDS}
     restart: unless-stopped    
   mongo:
     image: mongo:7
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD}
     volumes:
         - db_data:/data/db
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      test: ["CMD-SHELL", "mongosh --quiet -u \"$$MONGO_INITDB_ROOT_USERNAME\" -p \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval \"db.adminCommand('ping').ok\""]
       interval: 10s
       timeout: 5s
       retries: 5    
     restart: unless-stopped  
   redis:
     image: redis:8
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
     volumes:
         - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped  
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
 
   web:
     build: ./web
