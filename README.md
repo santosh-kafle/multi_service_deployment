@@ -3,6 +3,9 @@
 Five containers behind a single entry point: a React frontend, an Express API, MongoDB for
 persistence, Redis for caching, and Nginx as a reverse proxy. Orchestrated with Docker Compose.
 
+Built as a solution to the roadmap.sh **Multi-Service Application with Docker** project:
+<https://roadmap.sh/projects/multiservice-docker>
+
 ```
                        ┌──────────────────────────────┐
   browser ──:8080──▶   │  proxy (Nginx)               │
@@ -16,37 +19,99 @@ persistence, Redis for caching, and Nginx as a reverse proxy. Orchestrated with 
                     └──────────────┘       │       │
                                      ┌─────▼──┐ ┌──▼─────┐
                                      │ mongo  │ │ redis  │
+                                     │ (auth) │ │ (auth) │
                                      └────────┘ └────────┘
 ```
 
 The proxy is the only service that publishes a port. The API, database and cache are reachable
 only on the internal `app_network` bridge — verified: connections to 4000, 27017 and 6379 from
-the host are refused.
+the host are refused. Mongo and Redis both require a password on top of that.
 
 ## Quick start
 
 ```bash
-docker compose up -d --build
+cp .env.example .env
+# fill in MONGO_ROOT_PASSWORD and REDIS_PASSWORD — generate each with:
+openssl rand -hex 24
+
+docker compose up -d --build --wait
 ```
 
-Open <http://localhost:8080>.
+Open <http://localhost:8080>. `--wait` returns once all five services report `healthy`.
 
 ```bash
-docker compose ps              # status of all five services
+docker compose ps              # status and health of all five services
 docker compose logs -f api     # follow one service
 docker compose down            # stop, keep data
 docker compose down -v         # stop and wipe volumes
 ```
 
+## Configuration
+
+All configuration lives in one root `.env` file (gitignored; `.env.example` is the committed
+template). Compose reads it to fill in `${...}` references in `docker-compose.yml`, and each
+container is handed only the variables it actually uses.
+
+| Variable | Used by | Purpose |
+|---|---|---|
+| `MONGO_ROOT_USERNAME` | mongo, api | Root user created on Mongo's first start |
+| `MONGO_ROOT_PASSWORD` | mongo, api | Its password |
+| `REDIS_PASSWORD` | redis, api | Passed to `redis-server --requirepass` |
+| `MONGO_DB` | api | Database the app reads and writes (`appdb`) |
+| `CACHE_TTL_SECONDS` | api | Lifetime of cached responses |
+| `PORT` | api | Port Express listens on inside the network |
+| `NODE_ENV` | api | `production` — no stack traces in error responses |
+
+The API never receives the raw passwords as separate variables. Compose builds its connection
+strings from the parts above:
+
+```
+MONGO_URL = mongodb://<user>:<password>@mongo:27017/appdb?authSource=admin
+REDIS_URL = redis://:<password>@redis:6379
+```
+
+`authSource=admin` is needed because the root user lives in Mongo's `admin` database while the
+app works in `appdb`. Passwords are generated as hex so they never contain URL-reserved
+characters like `@`, `:` or `/`.
+
+> **Mongo reads `MONGO_ROOT_*` only when its data volume is empty.** Changing the password in
+> `.env` after the first start has no effect on the existing user. See
+> [Rotating passwords](#rotating-passwords).
+
 ## Services
 
-| Service | Image | Exposure | Notes |
+| Service | Image | Exposure | Healthcheck |
 |---|---|---|---|
-| `proxy` | built from `proxy/` | **`8080` → 80** | Only published port. Routes `/api/` and `/` |
-| `web` | built from `web/` | internal 80 | React compiled by Vite, served as static files |
-| `api` | built from `api/` | internal 4000 | Express on Node 20 |
-| `mongo` | `mongo:7` | internal 27017 | Data in the `db_data` volume |
-| `redis` | `redis:8` | internal 6379 | Cache only, not persisted (see Design decisions) |
+| `proxy` | built from `proxy/` | **`8080` → 80** | `wget` against itself |
+| `web` | built from `web/` | internal 80 | `wget` against itself |
+| `api` | built from `api/` | internal 4000 | `GET /api/ready` — pings Mongo and Redis |
+| `mongo` | `mongo:7` | internal 27017 | authenticated `mongosh` ping |
+| `redis` | `redis:8` | internal 6379 | authenticated `redis-cli ping` |
+
+Data lives in two named volumes: `db_data` (Mongo) and `redis_data` (Redis, append-only file).
+
+## Startup order and health
+
+Every service has a healthcheck, and startup is gated on them rather than on containers merely
+existing:
+
+```
+mongo ─┐
+       ├─(healthy)─▶ api ─┐
+redis ─┘                  ├─(healthy)─▶ proxy
+                    web ──┘
+```
+
+`depends_on` with `condition: service_healthy` means the API doesn't start until both data
+stores answer, and the proxy doesn't start until there's something behind it to route to.
+
+The database healthchecks **authenticate**. An unauthenticated `ping` succeeds against a
+locked Mongo, and `redis-cli` exits `0` even on an auth failure — so a plain ping would report
+`healthy` while every real query fails. The Redis check pipes through `grep -q PONG` to turn a
+wrong password into a failing check.
+
+Every service has `restart: unless-stopped`: a crashed container comes back on its own, but one
+stopped deliberately stays stopped.
 
 ## How a request flows
 
@@ -59,8 +124,10 @@ whatever host served the page, so no API hostname is baked in at build time and 
 works in any environment. The proxy matches `location /api/` and forwards to the API with the
 path intact.
 
-Service-to-service addressing uses Compose's DNS: a container's hostname *is* its service name,
-so the proxy targets `http://api:4000` and the API connects to `mongodb://mongo:27017`.
+Service-to-service addressing uses Compose's DNS: a container's hostname *is* its service name.
+The proxy re-resolves those names every 10 seconds (`resolver 127.0.0.11 valid=10s` with a
+variable in `proxy_pass`) instead of caching the IP it saw at startup, so recreating `api` or
+`web` doesn't leave the proxy pointing at a dead address.
 
 ## API
 
@@ -82,8 +149,8 @@ curl localhost:8080/api/items
 ## Caching
 
 `GET /api/items` uses a cache-aside strategy: check Redis, fall back to Mongo on a miss, then
-backfill the key with a 30-second TTL. Writes **delete** the key rather than updating it, which
-costs one extra read and removes a whole class of staleness bugs.
+backfill the key with a TTL of `CACHE_TTL_SECONDS`. Writes **delete** the key rather than
+updating it, which costs one extra read and removes a whole class of staleness bugs.
 
 The response reports which path it took, so the effect is measurable rather than assumed:
 
@@ -97,7 +164,7 @@ an item to see it fall back to Mongo.
 
 ## Design decisions
 
-Full reasoning, including the bugs that produced it, is in [`NOTES.md`](NOTES.md).
+Full reasoning is in [`NOTES.md`](NOTES.md).
 
 - **Multi-stage build for the frontend** — build tooling (Vite, esbuild, `node_modules`) stays
   in stage one. The runtime image carries only compiled static files: **75MB vs 218MB** for the
@@ -111,8 +178,31 @@ Full reasoning, including the bugs that produced it, is in [`NOTES.md`](NOTES.md
 - **Pinned image tags** — no `latest` anywhere, so builds are reproducible.
 - **Routing separated from serving** — the web container only hands out files; every routing
   decision lives in the proxy.
-- **Redis is not persisted** — it holds only derived cache data. Losing it on restart costs one
-  slow request, not correctness. This would change if it ever held sessions or queues.
+- **One `.env`, least privilege per container** — a single source of truth for secrets, but
+  Redis never sees the Mongo password and the API never sees raw passwords.
+- **Healthchecks that prove auth works** — see [Startup order and health](#startup-order-and-health).
+
+## Rotating passwords
+
+**Before Mongo has ever started** (or when losing data is acceptable): edit `.env`, then
+`docker compose down -v && docker compose up -d --wait`.
+
+**With data you want to keep:** change the password inside Mongo first, while the container
+still holds the old one, then update `.env` to match and recreate.
+
+```bash
+docker compose exec mongo sh -c 'mongosh --quiet \
+  -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin \
+  --eval "db.getSiblingDB(\"admin\").changeUserPassword(\"$MONGO_INITDB_ROOT_USERNAME\", \"NEW_PASSWORD\")"'
+# put NEW_PASSWORD in .env as MONGO_ROOT_PASSWORD, then:
+docker compose up -d --force-recreate --wait
+```
+
+The single quotes keep your host shell from touching the `$` variables — they're read inside
+the container. Recreating hands the new value to both the Mongo healthcheck and the API's
+connection string.
+
+Redis holds its password only in memory, so updating `.env` and recreating is enough.
 
 ## Verifying
 
@@ -124,25 +214,32 @@ Black-box tests the running stack: routing, SPA fallback, health and readiness, 
 input validation, cache hit/miss, cache invalidation on write, volume persistence across a
 Mongo restart, and that only the proxy publishes a port.
 
-Current status: **13 passed, 0 failed**.
+Current status: **13 passed, 0 failed**, with authentication enabled on Mongo and Redis.
 
 ## Known limitations
 
 Honest list of what isn't done yet:
 
-- **No healthchecks.** `docker compose ps` reports `Up`, not `healthy`.
-- **`depends_on` orders starts, not readiness.** The stack survives because the API retries its
-  connections ten times over twenty seconds — not because Compose waits for a working database.
-- **No authentication on Mongo or Redis.** Both are unreachable from the host, so this is
-  defence-in-depth rather than an open door, but it should be fixed.
-- **No secrets management** — no `.env` / `.env.example` yet.
-- **No `restart` policies** — a crashed container stays down.
-- **`NODE_ENV` is unset**, so Express runs in development mode and returns stack traces on
-  errors.
+- **No log rotation.** Containers use Docker's default `json-file` driver with no size cap, so
+  logs grow until the disk fills.
+- **Secrets are environment variables.** They are visible in `docker inspect`. The Redis
+  password is also visible in the host's process list, because it's passed as a
+  `--requirepass` command-line flag (the official image has no environment variable for it).
+  Docker secrets would fix this for Mongo (via `MONGO_INITDB_ROOT_PASSWORD_FILE`); Redis would
+  need a wrapper entrypoint or a mounted config file.
+- **The API uses the Mongo root account.** A dedicated user with `readWrite` on `appdb` only
+  would limit the damage if the API were compromised.
+- **Unhealthy containers are not restarted.** Docker's restart policy acts when a process
+  *exits*, not when its healthcheck fails. A hung-but-running API stays unhealthy until someone
+  intervenes.
+- **Nginx master processes run as root** in `web` and `proxy` (workers drop to the `nginx`
+  user). `nginxinc/nginx-unprivileged` would remove that.
+- **No TLS.** The proxy serves plain HTTP on 8080.
+- **No CI.** `verify.sh` runs by hand, not on every push.
 
 ## Local development without Docker
 
 ```bash
-cd api && npm install && npm run dev   # needs Mongo and Redis reachable
+cd api && npm install && npm run dev   # needs MONGO_URL and REDIS_URL pointing at running instances
 cd web && npm install && npm run dev   # Vite dev server proxies /api to localhost:4000
 ```

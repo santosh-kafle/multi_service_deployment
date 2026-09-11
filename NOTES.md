@@ -1,138 +1,174 @@
 # Engineering notes
 
-This is notes for this project's infra and my decisions behind it.
+These are my notes on this project's infrastructure: what I chose, and why. The README says
+what the stack does; this file is the reasoning behind it.
 
-Written as I went. Decisions first, then the things that broke and what they taught me.
+Project brief: <https://roadmap.sh/projects/multiservice-docker>
 
 ---
 
-## Design decisions
+## Images and builds
 
-**`node:20-alpine` as the base image.** Alpine's base layer is ~5MB against ~100MB+ for the
-Debian variants. The API image lands at 218MB, most of which is Node itself plus
+**`node:20-alpine` as the base image.** Alpine's base layer is about 5MB, against 100MB+ for
+the Debian variants. The API image lands at 218MB, and most of that is Node itself plus
 `node_modules`. Alpine uses musl instead of glibc, which can matter for packages with native
-bindings — none here, so the tradeoff is free.
+bindings. None of mine have any, so the smaller image costs me nothing.
 
 **`npm ci`, not `npm install`.** `npm install` treats `package-lock.json` as a suggestion: if
-`package.json` permits a newer version it will install it and rewrite the lockfile. Inside a
-container that rewrite is thrown away at the end of the build, so the image can quietly
-contain versions I never tested. `npm ci` installs strictly from the lockfile and fails loudly
-if the two files disagree — a silent drift turned into a build error.
+`package.json` allows a newer version, it installs that and rewrites the lockfile. Inside a
+build, that rewrite is thrown away, so the image could quietly contain versions I never tested.
+`npm ci` installs exactly what the lockfile says and fails if the two files disagree.
 
-**Manifests copied before source.** `COPY package*.json ./` and `RUN npm ci` sit above
-`COPY . .` so that editing a route file doesn't reinstall every dependency. Docker keys its
-cache on **file content**, not timestamps — I confirmed this: `touch package.json` did *not*
-bust the cache, but changing a character inside it did.
+**Dependency manifests copied before source.** `COPY package*.json ./` and `RUN npm ci` sit
+above `COPY . .`, so editing a route file doesn't reinstall every dependency. Docker keys its
+layer cache on file *content*, not timestamps, so only a real change to `package.json`
+triggers a reinstall.
 
-**`node src/server.js` as CMD, not `npm start`.** With `npm start`, npm is PID 1 and the app
-is its child. Docker sends `SIGTERM` to PID 1 on `docker compose stop`, npm doesn't reliably
-forward it, so the shutdown handlers in `server.js` never run — connections get severed
-instead of closed, and the container is `SIGKILL`ed after the 10s grace period. Running Node
-directly makes it PID 1 so signals land where they're handled.
+**`node src/server.js` as the command, not `npm start`.** With `npm start`, npm becomes PID 1
+and the app is its child. Docker sends `SIGTERM` to PID 1 on shutdown, and npm doesn't reliably
+pass it on, so the API's shutdown handlers would never run. Running Node directly makes it
+PID 1, and the signal lands where it's handled.
 
-**`USER node` plus `COPY --chown=node:node`.** The official Node image ships an unprivileged
-user. The `USER` line goes *after* the `COPY` steps, since those need root to write into
-`/app`. `--chown` makes file ownership match the runtime user rather than leaving everything
-root-owned and readable-only by luck.
+**The API runs as the `node` user.** The official Node image ships an unprivileged user.
+`USER node` comes after the `COPY` steps, because those need root to write into `/app`, and
+`COPY --chown=node:node` makes the files belong to the user that actually runs them.
 
 **Multi-stage build for the frontend.** Building React needs Node, npm, Vite and esbuild.
-*Serving* it needs a web server and nothing else — the compiled JS runs in the user's browser,
-not in my container. Stage one builds; stage two starts from `nginx:1.27-alpine` and copies
-only `dist/` across. Result: **75MB versus 218MB** for the API, with all the build tooling
-discarded rather than shipped as attack surface.
+*Serving* it needs only a web server, because the compiled JavaScript runs in the user's
+browser, not in my container. Stage one builds; stage two starts from `nginx:1.27-alpine` and
+copies only `dist/` across. The result is 75MB against 218MB for the API, with none of the build
+tooling shipped.
 
-**Pinned image tags.** `mongo:7`, `nginx:1.27-alpine`, `node:20-alpine` — not `latest`.
-`latest` is a moving pointer that can jump a major version between builds and break the stack
-with no change on my side.
-
-**Only the proxy publishes a port.** `ports: "8080:80"` on the proxy; `expose` on api and web,
-which documents the internal port without opening it to the host. Mongo and Redis get neither.
-Verified: 4000, 8081, 27017 and 6379 all refuse connections from the host; only 8080 answers.
-
-**Static serving and routing kept separate.** The web container only hands out files
-(`try_files`). All routing decisions live in the proxy. Mixing the two is what caused the
-worst bug in this project (below).
+**Pinned image tags.** `mongo:7`, `redis:8`, `nginx:1.27-alpine`, `node:20-alpine`. Never
+`latest`, which is a moving pointer that can jump a major version between two builds and break
+the stack without any change on my side.
 
 ---
 
-## Things that broke, and what I learned
+## Networking and routing
 
-**`nodejs:20-alpine` doesn't exist.** The official image is `node`. Build failed at line 1
-with `pull access denied` — which is what Docker Hub returns for a nonexistent repository, not
-a permissions problem. Misleading error; worth remembering.
+**Only the proxy publishes a port.** `ports: "8080:80"` on the proxy, `expose` on the API and
+web (which documents the internal port without opening it to the host), and nothing at all on
+Mongo and Redis. I checked from the host: 4000, 27017 and 6379 refuse connections; only 8080
+answers.
 
-**`npm src/server.js` isn't a command.** `npm` is a package manager — its first argument must
-be a subcommand (`install`, `ci`, `start`). To *run* a JS file you need `node`, a different
-binary. Container built fine and died instantly on start.
+**Serving and routing are separate jobs.** The web container only hands out files, with
+`try_files` falling back to `index.html` so React can handle its own routes. Every routing
+decision lives in the proxy. Keeping each Nginx config to one job means neither can quietly do
+the other's.
 
-**Node can't run `main.jsx`.** My first web Dockerfile was a copy of the API's, trying to
-`node src/main.js`. Two reasons that can never work: `<App />` is JSX, which isn't JavaScript
-and must be compiled away first; and `document` is a browser API that doesn't exist in Node.
-This was the moment the frontend/backend distinction actually clicked — the API is a program
-that runs, the frontend is files that get compiled and downloaded.
+**The frontend calls the API with a relative URL.** `/api/items` resolves against whatever host
+served the page, so no hostname is baked into the build and the same image works anywhere.
 
-**Vite outputs to `dist/`, not `build/`.** `build/` is Create React App's convention and most
-React tutorials online are CRA-era. `COPY --from=0 /app/build` failed with
-`"/app/build": not found`. Technique worth keeping: `docker build --target <stage>` then
-`docker run --rm <image> ls /app` shows exactly what a build stage produced, instead of
-guessing.
+**`proxy_pass` without a path.** When `proxy_pass` contains a path, Nginx replaces the matched
+location prefix with it. My Express routes are mounted at `/api`, so the proxy must forward
+`/api/items` unchanged.
 
-**`//` is not a Dockerfile comment.** Dockerfiles use `#`. The parser read `//stage` as an
-instruction name: `unknown instruction: //stage`.
-
-**YAML: `-key=value` and `- key=value` are different things.** A list item is dash *plus
-space*. Without the space it's a plain string starting with a hyphen, so Compose saw
-`environment` holding a string and rejected it with
-`services.api.environment must be a mapping`.
-
-**A container's DNS name is its service name.** I had a service named `db` and a connection
-string pointing at `mongo://mongo:27017` — nothing resolved. Renamed the service to `mongo` so
-the name matches the thing, which also means the app's built-in default is already correct.
-
-**Environment variable names are case-sensitive and fail silently.** I first wrote
-`Database_url` instead of `MONGO_URL`. No error anywhere — the app just fell back to its
-default. Wrong-but-silent is much worse to debug than wrong-and-loud.
-
-**Declaring a volume is not mounting it.** A top-level `volumes:` block only says the volume
-exists. Data isn't persisted until a *service* mounts it at the path the image actually writes
-to (`/data/db` for Mongo — found in the image docs, not guessed).
-
-**`proxy_pass` and the trailing slash.** If the `proxy_pass` URL has a path component, Nginx
-*replaces* the matched location prefix with it; with no path, the original URI passes through
-untouched. For `location /api/`, `http://api:4000` forwards `/api/items` as `/api/items`,
-while `http://api:4000/` would forward it as `/items`. The Express routes are mounted at
-`/api`, so the no-slash form is correct. One character between working and 404s.
-
-**The proxy loop — best bug of the project.** After wiring the proxy, `/api/*` returned 200
-but `/` returned **400**. Not 404, not 502. Cause: I had overwritten `web/nginx.conf` with the
-proxy's config, so the web container was proxying to *itself* in an infinite loop. The 400
-came from `$proxy_add_x_forwarded_for` **appending** the client IP on every hop until the
-request header outgrew Nginx's buffer and got rejected. Two lasting lessons: a growing
-`X-Forwarded-For` chain in the logs is the fingerprint of a proxy loop, and because the
-innermost request fails first, the *longest* chain appears *first* in the log — reversed
-ordering is itself the tell.
-
-**Rebuilding doesn't always replace the running container.** The web image had been rebuilt
-but the container was still running the old image ID — Compose reported `Running`, not
-`Recreated`. `docker compose up -d --build --force-recreate` guarantees replacement. "I
-rebuilt and nothing changed" is usually this.
-
-**Commit early.** I lost `web/nginx.conf` by overwriting it, and it was unrecoverable because
-nothing had been committed for days. Committing after each working step turns that from a
-rewrite into a `git checkout`.
+**The proxy re-resolves service names.** By default Nginx looks up `api` and `web` once, at
+startup, and keeps those IPs forever. If either container is recreated and comes back on a new
+IP, the proxy keeps sending traffic to the old one. I point Nginx at Docker's embedded DNS
+(`resolver 127.0.0.11 valid=10s`) and put the upstream in a variable, which forces a fresh
+lookup at most every 10 seconds. With a variable, `proxy_pass` no longer passes the URI through
+on its own, so I append `$request_uri` explicitly.
 
 ---
 
-## Open items
+## Startup, health and recovery
 
-- [ ] `ENV NODE_ENV=production` in the API image — Express still runs in dev mode and will
-      leak stack traces in error responses.
-- [ ] **Redis persistence — decide and justify.** Currently no volume, so the cache is empty
-      after a restart. For a pure cache that's arguably correct: a cold start costs one slow
-      request. It would matter much more if Redis ever held sessions or queues. If persisting,
-      `appendonly` is needed — Redis's default durability is weaker than it looks.
-- [ ] Healthchecks on all five services.
-- [ ] `depends_on` with `condition: service_healthy`. Right now it only orders *starts*; the
-      stack works because the API retries its connections ten times, not because Compose waits.
-- [ ] Auth on Mongo and Redis, credentials in `.env`, with a committed `.env.example`.
-- [ ] `restart: unless-stopped` policies.
+**Every service has a healthcheck.** "Running" only means the process exists; it says nothing
+about whether it works. Each check tests the thing the service is for: the web servers fetch
+their own root page, the API hits `/api/ready`, and the databases answer an authenticated ping.
+
+**Healthchecks use `127.0.0.1`, not `localhost`.** Inside Alpine, `localhost` can resolve to
+the IPv6 address `::1`, while Nginx listens on IPv4 only. The literal address removes the
+ambiguity.
+
+**The API's healthcheck uses readiness, not liveness.** `/api/ready` pings Mongo and Redis, so
+the API only reports healthy when it can actually serve requests. That's what the proxy should
+wait for. The cost: a database outage marks the API unhealthy too, even though its process is
+fine.
+
+**Startup waits for health, not just for containers.** `depends_on` with
+`condition: service_healthy` holds the API back until both data stores answer, and holds the
+proxy back until the API and web are healthy. The API also retries its connections on
+startup, as a second layer, rather than as the only reason the stack works.
+
+**`restart: unless-stopped` on everything.** A container that crashes comes back on its own;
+one I stop on purpose stays stopped. Docker only restarts on process *exit*, not on a failing
+healthcheck, so a hung process still needs a human.
+
+---
+
+## Configuration and secrets
+
+**One `.env` file at the project root.** It's the single source of truth for every setting and
+secret, and it's gitignored. `.env.example` is the committed template with the secret values
+left blank. With one file, a password can't drift out of sync between two copies.
+
+**Each container gets only what it uses.** Compose reads `.env` to fill in `${...}`, but no
+container receives the whole file. Redis gets its own password and nothing else. Mongo gets its
+root credentials. The API gets exactly the variables `config.js` reads, plus `NODE_ENV`. If one
+service were compromised, it wouldn't hand over the credentials for the others.
+
+**Connection strings are built in Compose, not stored.** The API reads `MONGO_URL` and
+`REDIS_URL`, and Compose assembles them from the username and password in `.env`. Storing
+complete URLs would mean each password existed twice in the same file.
+
+**`authSource=admin` in the Mongo URL.** The root user is created in Mongo's `admin` database,
+while the app works in `appdb`. Without this, the driver would try to authenticate against
+`appdb` and fail.
+
+**Passwords are 48 hex characters, from `openssl rand -hex 24`.** Hex can't contain `@`, `:`,
+`/`, `?` or `#`, all of which have meaning inside a URL and would break a connection string
+unless percent-encoded.
+
+**Mongo auth comes from the image's own variables.** `MONGO_INITDB_ROOT_USERNAME` and
+`MONGO_INITDB_ROOT_PASSWORD` make the image's entrypoint create the root user and turn on
+`--auth` by itself, so I don't override Mongo's command. The image only does this on an empty
+data directory, so a password change after the first start has to happen inside the database.
+The README has the procedure.
+
+**Redis auth via `--requirepass`.** The official image has no environment variable for this,
+so the password goes on the command line. A mounted `redis.conf` would be the alternative. Redis also gets `REDIS_PASSWORD` in its environment,
+not for the server, but so the healthcheck can read it.
+
+**The database healthchecks authenticate.** I tested this in throwaway containers. An
+unauthenticated ping succeeds against a locked Mongo, and `redis-cli` exits `0` even on a wrong
+password. A plain ping would report healthy while every real query failed. The Mongo check logs
+in with `mongosh`; the Redis check pipes through `grep -q PONG` so only a real answer passes.
+Both use `$$` so the password is read from the container's environment at check time, rather
+than being written into the check itself.
+
+**`NODE_ENV=production`.** Express in development mode returns stack traces in error
+responses. Nothing about this stack is a development setup.
+
+---
+
+## Data
+
+**Mongo data on a named volume, `db_data`, mounted at `/data/db`.** That path comes from the
+image documentation. Declaring a volume at the top level only creates it; nothing persists
+until a service mounts it where the image actually writes.
+
+**Redis persisted with an append-only file on `redis_data`.** Redis holds only derived cache
+data, so losing it would cost a slow first request, not correctness. Persisting it means a
+restart doesn't start from a cold cache, and the stack is ready if Redis ever holds something
+that matters, like sessions.
+
+**Cache-aside with delete-on-write.** Reads check Redis, fall back to Mongo, and backfill the
+cache. Writes delete the cached key instead of updating it. That costs one extra database read
+after each write, and in exchange the cache can never hold a version of the data that Mongo
+doesn't.
+
+---
+
+## Still to do
+
+- [ ] **Log rotation.** Docker's default `json-file` driver has no size limit.
+- [ ] **CI.** Run `scripts/verify.sh` against a freshly built stack on every push.
+- [ ] **Docker secrets** instead of environment variables, so credentials stay out of
+      `docker inspect`. Mongo supports this via `_FILE` variables; Redis would need a wrapper.
+- [ ] **A dedicated Mongo user for the API**, with `readWrite` on `appdb` only, instead of root.
+- [ ] **Unprivileged Nginx** (`nginxinc/nginx-unprivileged`) for `web` and `proxy`.
+- [ ] Minor: `ENV NODE_ENV=production` in the API Dockerfile so the image is correct even
+      without Compose; `--from=build` instead of `--from=0` in the web Dockerfile.
