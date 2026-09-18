@@ -1,3 +1,8 @@
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
 services:
   api:
     build: ./api
@@ -20,6 +25,7 @@ services:
       - MONGO_DB=${MONGO_DB}
       - PORT=${PORT}
       - CACHE_TTL_SECONDS=${CACHE_TTL_SECONDS}
+    logging: *default-logging
     restart: unless-stopped    
   mongo:
     image: mongo:7
@@ -32,7 +38,12 @@ services:
       test: ["CMD-SHELL", "mongosh --quiet -u \"$$MONGO_INITDB_ROOT_USERNAME\" -p \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval \"db.adminCommand('ping').ok\""]
       interval: 10s
       timeout: 5s
-      retries: 5    
+      retries: 5  
+    logging:
+         <<: *default-logging 
+         options:
+          max-size: "50m"
+          max-file: "5"
     restart: unless-stopped  
   redis:
     image: redis:8
@@ -44,6 +55,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    logging: *default-logging
     restart: unless-stopped  
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
@@ -57,6 +69,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5 
+    logging: *default-logging
     restart: unless-stopped 
 
   proxy:
@@ -73,6 +86,7 @@ services:
         interval: 10s
         timeout: 5s
         retries: 5  
+     logging: *default-logging
      restart: unless-stopped 
 networks:
   default:
