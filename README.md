@@ -113,6 +113,46 @@ wrong password into a failing check.
 Every service has `restart: unless-stopped`: a crashed container comes back on its own, but one
 stopped deliberately stays stopped.
 
+## Logging
+
+Every container writes its logs to stdout and stderr, and Docker's `json-file` driver stores
+them on the host. Read them with:
+
+```bash
+docker compose logs -f api          # follow one service
+docker compose logs --tail 50       # recent lines from everything
+```
+
+Nothing writes log files inside a container. The Nginx images achieve that by symlinking
+`/var/log/nginx/access.log` to `/dev/stdout` and `error.log` to `/dev/stderr`, so an app that
+insists on files still ends up on the container's output streams.
+
+**Log growth is capped.** Compose's default is no limit at all, which means one chatty service
+can fill the disk and take every other service down with it. A shared policy is defined once as
+a YAML anchor and referenced by each service:
+
+| Service | Max size | Files kept | Ceiling |
+|---|---|---|---|
+| `api`, `web`, `proxy`, `redis` | 10 MB | 3 | 30 MB each |
+| `mongo` | 50 MB | 5 | 250 MB |
+
+When the active file reaches `max-size` it is rotated and the oldest file is deleted, so disk
+use per container can't exceed `max-size × max-file`. Total ceiling for the stack: **370 MB**.
+
+**Why Mongo gets its own policy.** Measured on an idle stack, Mongo writes about 63 MB a day
+against the API's 0.2 MB — roughly 7 KB per healthcheck, because it logs a connection opened, a
+full SCRAM authentication record, and a connection closed every ten seconds. Under the shared
+policy it would have kept about eleven hours of history. Its larger allowance buys roughly four
+days.
+
+Two things worth knowing about this setup:
+
+- **Rotation discards the oldest lines.** These limits are a retention decision, not just a
+  disk-safety one. When a file is rotated out it's deleted, not archived.
+- **`max-size` measures stored bytes, not your text.** Each line is wrapped as
+  `{"log":"...","stream":"stdout","time":"..."}`, and the timestamp alone is 30 bytes. For
+  short log lines the envelope can be most of the file.
+
 ## How a request flows
 
 A request to `http://localhost:8080/items` hits the proxy, matches `location /`, and is
@@ -181,6 +221,9 @@ Full reasoning is in [`NOTES.md`](NOTES.md).
 - **One `.env`, least privilege per container** — a single source of truth for secrets, but
   Redis never sees the Mongo password and the API never sees raw passwords.
 - **Healthchecks that prove auth works** — see [Startup order and health](#startup-order-and-health).
+- **One logging policy, one measured exception** — a shared anchor caps every container's
+  logs, with a larger allowance for Mongo because it demonstrably writes 300× more than the
+  API. See [Logging](#logging).
 
 ## Rotating passwords
 
@@ -220,8 +263,10 @@ Current status: **13 passed, 0 failed**, with authentication enabled on Mongo an
 
 Honest list of what isn't done yet:
 
-- **No log rotation.** Containers use Docker's default `json-file` driver with no size cap, so
-  logs grow until the disk fills.
+- **Logs stay on the host, and die with the container.** Rotation bounds disk use, but rotated
+  lines are deleted rather than archived, and `docker compose down` destroys the history along
+  with the containers. Anything worth keeping past an incident needs shipping to a log
+  aggregator.
 - **Secrets are environment variables.** They are visible in `docker inspect`. The Redis
   password is also visible in the host's process list, because it's passed as a
   `--requirepass` command-line flag (the official image has no environment variable for it).

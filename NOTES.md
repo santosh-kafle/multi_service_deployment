@@ -99,6 +99,44 @@ healthcheck, so a hung process still needs a human.
 
 ---
 
+## Logging
+
+**Everything logs to stdout and stderr, and Docker collects it.** No service writes a log file
+inside its own container. A file in a container is invisible to `docker compose logs`, needs its
+own rotation, and disappears when the container is replaced. Both Nginx images already handle
+this by symlinking their access and error logs to `/dev/stdout` and `/dev/stderr`, which is the
+standard way to make a file-oriented program behave like a container.
+
+**I capped how much Docker keeps.** The default is no limit — the log file grows until the disk
+is full. What made me treat that as urgent rather than theoretical is that the failure isn't
+local: a full disk breaks every service on the host, not just the noisy one. An idle API was
+already writing about a megabyte a day, almost entirely from its own healthcheck.
+
+**One policy, defined once.** The driver and its limits live in a top-level `x-logging` block as
+a YAML anchor, and each service references it with an alias. Five copies of the same four lines
+would have drifted the first time I changed my mind about a number.
+
+**Mongo has a deliberately larger allowance.** I measured each service before choosing numbers.
+Mongo writes around 63 MB a day where the API writes 0.2 MB — about 7 KB per healthcheck,
+because it records a connection opened, a full SCRAM authentication handshake, and a connection
+closed, every ten seconds. Under the shared 10 MB × 3 policy it would have kept roughly eleven
+hours of history, which is short enough to have lost the evidence by the time anyone looks. It
+gets 50 MB × 5 instead, about four days.
+
+I considered two cheaper fixes and rejected both. `mongod --quiet` cut the volume by only about
+30% in a side-by-side test — it drops some connection chatter but keeps the bulky authentication
+records. Raising the healthcheck interval to 30 seconds would have cut it threefold, but slowing
+down how fast I notice a dead database is a worse trade than spending disk. The volume comes
+from an audit trail I'd actually want during an incident, so paying for it is the honest answer.
+
+**These limits are a retention decision, not just a disk-safety one.** Rotated files are
+deleted, not archived, and the lines that go first are the oldest — which is exactly the part
+you want when reconstructing what happened. `max-size` also counts what Docker stores rather
+than what I wrote: every line is wrapped in a JSON envelope with a 30-byte timestamp, so for
+short lines most of the file is metadata.
+
+---
+
 ## Configuration and secrets
 
 **One `.env` file at the project root.** It's the single source of truth for every setting and
@@ -164,7 +202,8 @@ doesn't.
 
 ## Still to do
 
-- [ ] **Log rotation.** Docker's default `json-file` driver has no size limit.
+- [ ] **Ship logs off the host.** Rotation bounds the disk, but history is still deleted on
+      rotation and lost entirely when containers are removed.
 - [ ] **CI.** Run `scripts/verify.sh` against a freshly built stack on every push.
 - [ ] **Docker secrets** instead of environment variables, so credentials stay out of
       `docker inspect`. Mongo supports this via `_FILE` variables; Redis would need a wrapper.
