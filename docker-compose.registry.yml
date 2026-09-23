@@ -1,0 +1,10 @@
+# Run the stack from images published by CI instead of building from source:
+#   IMAGE_TAG=<commit sha> docker compose -f docker-compose.yml -f docker-compose.registry.yml pull
+#   IMAGE_TAG=<commit sha> docker compose -f docker-compose.yml -f docker-compose.registry.yml up -d --no-build --wait
+services:
+  api:
+    image: ghcr.io/santosh-kafle/multi_service_deployment-api:${IMAGE_TAG:?set IMAGE_TAG to a commit sha}
+  web:
+    image: ghcr.io/santosh-kafle/multi_service_deployment-web:${IMAGE_TAG:?set IMAGE_TAG to a commit sha}
+  proxy:
+    image: ghcr.io/santosh-kafle/multi_service_deployment-proxy:${IMAGE_TAG:?set IMAGE_TAG to a commit sha}
