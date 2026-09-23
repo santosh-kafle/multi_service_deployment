@@ -44,7 +44,8 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         run: |
           for svc in api web proxy; do
-            echo "will push $svc"
+            docker tag multi_service_deployment-$svc ghcr.io/santosh-kafle/multi_service_deployment-$svc:$GITHUB_SHA
+            docker push ghcr.io/santosh-kafle/multi_service_deployment-$svc:$GITHUB_SHA
           done
 
       - name: Tear down
