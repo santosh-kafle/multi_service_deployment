@@ -71,6 +71,13 @@ IP, the proxy keeps sending traffic to the old one. I point Nginx at Docker's em
 lookup at most every 10 seconds. With a variable, `proxy_pass` no longer passes the URI through
 on its own, so I append `$request_uri` explicitly.
 
+**No fixed network name.** Compose already gives every project its own network, named after
+the project (`multi_service_deployment_default`), and I keep that default. A fixed name such as
+`app_network` is global on the machine, so every copy of the stack would join the same network:
+`api`, `mongo` and `redis` would each resolve to two containers, and requests could land on the
+other copy's database with the wrong password. Nothing outside the project needs to join this
+network, so a fixed name would add that risk and buy nothing.
+
 ---
 
 ## Startup, health and recovery
@@ -200,7 +207,7 @@ doesn't.
 
 ---
 
-## Continuous integration
+## CI/CD
 
 **CI runs the whole stack, not unit tests.** The workflow builds all five images, starts them,
 waits for every healthcheck, and runs `scripts/verify.sh` — the same script I run by hand. What
@@ -218,18 +225,55 @@ never needs to reach `master` to be caught.
 
 **CI generates its own passwords instead of using GitHub secrets.** The database in CI exists
 for about two minutes and is destroyed with the VM. A random password made on the spot does the
-job, and a stored secret would just be one more credential that could leak. The step copies
-`.env.example` and fills each blank password with `openssl rand -hex 24` via `sed`.
+job, and a stored secret would just be one more credential that could leak.
 
-**The `.env` step checks its own output.** `sed` exits successfully even when it matches
-nothing, so a misspelled or renamed variable would leave a password empty while the step still
-showed green, and the run would fail later somewhere unrelated. Two `grep -q` lines confirm each
-password is exactly 48 hex characters. `grep` exits non-zero when it finds nothing, and GitHub
-runs each step with `bash -e`, so a missing password stops the run at the step that caused it.
+**One script creates `.env`, for CI and for people.** `scripts/init-env.sh` copies
+`.env.example` and fills each blank password with `openssl rand -hex 24`. The same commands
+started inside the workflow, but a new clone needs exactly the same thing, and two copies of
+them would drift the first time the template changed. The script adds two things CI never
+needed: it refuses to run if `.env` already exists, because new passwords would lock the API
+out of an existing Mongo volume, and it makes the file readable only by its owner.
+
+**The script checks its own output.** `sed` exits successfully even when it matches nothing, so
+a misspelled or renamed variable would leave a password empty while everything still looked
+green, and the stack would fail later somewhere unrelated. The script confirms each password is
+exactly 48 hex characters, names the one that's missing, and deletes the half-made `.env`.
 
 **Logs on failure, teardown always.** A failed step normally skips everything after it. The
 log dump runs under `if: failure()`, so a red run shows me what every container said, and the
-teardown runs under `if: always()`, so it happens regardless of the result.
+teardown runs under `if: always()`, so it happens regardless of the result. I proved the
+pipeline can fail by breaking `/api/health` on a pull request: every container still came up
+healthy, and only `verify.sh` caught it.
+
+**CD means publishing images, because there's nowhere to deploy.** With no server, the useful
+end of the pipeline is a tested, versioned artifact anyone can run. Green commits on `master`
+push the `api`, `web` and `proxy` images to GitHub Container Registry, which comes with the
+repository and needs no extra account. Deploying later would be a pull and an `up` on the
+server, with no change to the pipeline.
+
+**Images are pushed from the job that tested them.** A separate publish job would run on a new
+VM and rebuild, so what I shipped wouldn't be byte-for-byte what passed. The login and push
+steps sit after Verify in the same job, so a failed check means nothing is published.
+
+**Only pushes to `master` publish.** Both CD steps run under
+`github.event_name == 'push' && github.ref == 'refs/heads/master'`. Pull requests still run the
+full test, but code that hasn't been merged is never released.
+
+**Tagged by commit SHA only, no `latest`.** Every image names the exact commit it was built
+from, so a bug report against a tag leads straight to the code. I pin every image I pull by
+version, and publishing a moving `latest` would offer other people the thing I don't use myself.
+The cost is that running an image means looking up a SHA.
+
+**No stored registry credentials.** The login uses the `GITHUB_TOKEN` GitHub creates for each
+run. The job's `permissions` allow it to read the code and write packages, nothing else, and it
+expires when the job ends.
+
+**Running from the registry is a separate Compose file.** `docker-compose.registry.yml` only
+sets `image:` on the three built services. Putting those names in the main file would make
+Compose tag its own local builds with them too, and CI's push loop would no longer find the
+images it tags. I avoided the name `docker-compose.override.yml`, which Compose loads
+automatically, so the registry file only applies when passed with `-f`. `IMAGE_TAG` uses
+`${IMAGE_TAG:?...}`, so forgetting it is an error instead of a guess.
 
 ---
 
@@ -239,8 +283,11 @@ teardown runs under `if: always()`, so it happens regardless of the result.
       rotation and lost entirely when containers are removed.
 - [x] **CI.** `scripts/verify.sh` runs against a freshly built stack on every push and pull
       request.
-- [ ] **CD: publish images.** After a green run on `master`, push `api`, `web` and `proxy` to
-      GitHub Container Registry, tagged with the commit SHA, from the same job that tested them.
+- [x] **CD: publish images.** Green runs on `master` push `api`, `web` and `proxy` to GitHub
+      Container Registry, tagged with the commit SHA, from the same job that tested them.
+- [ ] **Deploy somewhere.** If I get a server: pull a tested SHA with
+      `docker-compose.registry.yml` and `up --no-build`, triggered from the pipeline.
+- [ ] **Resolve the `npm audit` warning** in the API's dependencies (one moderate advisory).
 - [ ] **Docker secrets** instead of environment variables, so credentials stay out of
       `docker inspect`. Mongo supports this via `_FILE` variables; Redis would need a wrapper.
 - [ ] **A dedicated Mongo user for the API**, with `readWrite` on `appdb` only, instead of root.

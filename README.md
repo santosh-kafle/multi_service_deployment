@@ -26,20 +26,24 @@ Built as a solution to the roadmap.sh **Multi-Service Application with Docker** 
 ```
 
 The proxy is the only service that publishes a port. The API, database and cache are reachable
-only on the internal `app_network` bridge — verified: connections to 4000, 27017 and 6379 from
+only on the project's internal network — verified: connections to 4000, 27017 and 6379 from
 the host are refused. Mongo and Redis both require a password on top of that.
 
 ## Quick start
 
 ```bash
-cp .env.example .env
-# fill in MONGO_ROOT_PASSWORD and REDIS_PASSWORD — generate each with:
-openssl rand -hex 24
-
+git clone https://github.com/santosh-kafle/multi_service_deployment.git
+cd multi_service_deployment
+./scripts/init-env.sh              # creates .env with freshly generated passwords
 docker compose up -d --build --wait
+./scripts/verify.sh                # expect 13 passed, 0 failed
 ```
 
 Open <http://localhost:8080>. `--wait` returns once all five services report `healthy`.
+
+`init-env.sh` refuses to run if `.env` already exists, because new passwords would no longer
+match the user already stored in Mongo's volume. To skip building entirely and run the images
+CI published, see [Running the published images](#running-the-published-images).
 
 ```bash
 docker compose ps              # status and health of all five services
@@ -51,8 +55,9 @@ docker compose down -v         # stop and wipe volumes
 ## Configuration
 
 All configuration lives in one root `.env` file (gitignored; `.env.example` is the committed
-template). Compose reads it to fill in `${...}` references in `docker-compose.yml`, and each
-container is handed only the variables it actually uses.
+template, and `scripts/init-env.sh` creates `.env` from it with generated passwords). Compose
+reads it to fill in `${...}` references in `docker-compose.yml`, and each container is handed
+only the variables it actually uses.
 
 | Variable | Used by | Purpose |
 |---|---|---|
@@ -226,9 +231,11 @@ Full reasoning is in [`NOTES.md`](NOTES.md).
 - **One logging policy, one measured exception** — a shared anchor caps every container's
   logs, with a larger allowance for Mongo because it demonstrably writes 300× more than the
   API. See [Logging](#logging).
-- **CI tests the whole stack, not pieces of it** — every push builds all five containers on a
-  clean machine and runs the same black-box checks used locally, with throwaway credentials.
-  See [Continuous integration](#continuous-integration).
+- **CI tests the whole stack, CD ships exactly what was tested** — every push builds all five
+  containers on a clean machine and runs the same black-box checks used locally; green commits
+  on `master` publish those same images, tagged by commit. See [CI/CD](#cicd).
+- **No fixed network name** — each Compose project gets its own network, so two copies of the
+  stack on one machine can't resolve each other's services.
 
 ## Rotating passwords
 
@@ -265,25 +272,54 @@ Mongo restart, and that only the proxy publishes a port.
 Current status: **13 passed, 0 failed**, with authentication enabled on Mongo and Redis — both
 locally and in CI on every push.
 
-## Continuous integration
+## CI/CD
 
 Every push to `master`, and every pull request, runs
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) on a fresh GitHub-hosted Ubuntu VM:
 
-1. **Create `.env`** from `.env.example`, filling both passwords with `openssl rand -hex 24`,
-   then check that each one really is 48 hex characters.
+1. **Create `.env`** with `./scripts/init-env.sh` — the same script used for a new clone.
 2. **Build and start** with `docker compose up -d --build --wait`, which only returns once
    every healthcheck passes.
 3. **Verify** by running `./scripts/verify.sh` — the same script used locally. Any failed check
    exits non-zero and fails the run.
 4. **Dump logs** from every container, only if something failed.
-5. **Tear down** with `docker compose down -v`, always.
+5. **Publish** — on a push to `master` only, after verification passed: log in to GitHub
+   Container Registry and push the `api`, `web` and `proxy` images, tagged with the commit SHA.
+6. **Tear down** with `docker compose down -v`, always.
 
 No secrets are stored in GitHub. The database in CI lives for about two minutes, so each run
-generates its own passwords and throws them away with the VM.
+generates its own passwords and throws them away with the VM. The registry login uses the
+`GITHUB_TOKEN` that GitHub issues for each run, allowed to write packages and nothing more.
+
+Pull requests run steps 1–4 and 6; publishing is skipped, so unmerged code is never released.
+A deliberately broken `/api/health` on a pull request turned the run red at **Verify**, with
+logs dumped and teardown still run.
 
 Results are on the [Actions tab](https://github.com/santosh-kafle/multi_service_deployment/actions);
 the badge at the top of this README shows the latest run on `master`.
+
+### Running the published images
+
+Every green commit on `master` is available as three public images:
+
+```
+ghcr.io/santosh-kafle/multi_service_deployment-api:<commit sha>
+ghcr.io/santosh-kafle/multi_service_deployment-web:<commit sha>
+ghcr.io/santosh-kafle/multi_service_deployment-proxy:<commit sha>
+```
+
+[`docker-compose.registry.yml`](docker-compose.registry.yml) points the three services at them.
+Run it on top of the main file, and nothing is built locally:
+
+```bash
+./scripts/init-env.sh                       # a .env is still needed; images contain no secrets
+export IMAGE_TAG=$(git rev-parse HEAD)      # any commit whose CI run went green
+docker compose -f docker-compose.yml -f docker-compose.registry.yml pull
+docker compose -f docker-compose.yml -f docker-compose.registry.yml up -d --no-build --wait
+```
+
+`IMAGE_TAG` is required — Compose stops with an error if it's unset rather than guessing a
+version. Rolling back is the same command with an older SHA.
 
 ## Known limitations
 
@@ -306,8 +342,9 @@ Honest list of what isn't done yet:
 - **Nginx master processes run as root** in `web` and `proxy` (workers drop to the `nginx`
   user). `nginxinc/nginx-unprivileged` would remove that.
 - **No TLS.** The proxy serves plain HTTP on 8080.
-- **CI, but no CD yet.** Every push is tested, but a passing run doesn't publish anything —
-  images are built on the runner and discarded. Nothing is deployed automatically.
+- **Delivery, not deployment.** Tested images are published on every green commit, but there's
+  no server, so nothing runs them automatically. Deploying means running the
+  [published images](#running-the-published-images) somewhere by hand.
 
 ## Local development without Docker
 
