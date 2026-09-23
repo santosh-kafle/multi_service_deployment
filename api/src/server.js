@@ -16,7 +16,7 @@ app.use((req, res, next) => {
 });
 
 // Liveness: the process is up. Cheap on purpose — no dependency calls.
-app.get('/api/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
+app.get('/api/health', (req, res) => res.status(500).json({ status: 'ok', uptime: process.uptime() }));
 
 // Readiness: safe to send traffic, i.e. dependencies actually answer.
 app.get('/api/ready', async (req, res) => {
