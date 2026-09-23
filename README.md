@@ -1,5 +1,7 @@
 # Multi-Service Deployment
 
+[![CI](https://github.com/santosh-kafle/multi_service_deployment/actions/workflows/ci.yml/badge.svg)](https://github.com/santosh-kafle/multi_service_deployment/actions/workflows/ci.yml)
+
 Five containers behind a single entry point: a React frontend, an Express API, MongoDB for
 persistence, Redis for caching, and Nginx as a reverse proxy. Orchestrated with Docker Compose.
 
@@ -224,6 +226,9 @@ Full reasoning is in [`NOTES.md`](NOTES.md).
 - **One logging policy, one measured exception** — a shared anchor caps every container's
   logs, with a larger allowance for Mongo because it demonstrably writes 300× more than the
   API. See [Logging](#logging).
+- **CI tests the whole stack, not pieces of it** — every push builds all five containers on a
+  clean machine and runs the same black-box checks used locally, with throwaway credentials.
+  See [Continuous integration](#continuous-integration).
 
 ## Rotating passwords
 
@@ -257,7 +262,28 @@ Black-box tests the running stack: routing, SPA fallback, health and readiness, 
 input validation, cache hit/miss, cache invalidation on write, volume persistence across a
 Mongo restart, and that only the proxy publishes a port.
 
-Current status: **13 passed, 0 failed**, with authentication enabled on Mongo and Redis.
+Current status: **13 passed, 0 failed**, with authentication enabled on Mongo and Redis — both
+locally and in CI on every push.
+
+## Continuous integration
+
+Every push to `master`, and every pull request, runs
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) on a fresh GitHub-hosted Ubuntu VM:
+
+1. **Create `.env`** from `.env.example`, filling both passwords with `openssl rand -hex 24`,
+   then check that each one really is 48 hex characters.
+2. **Build and start** with `docker compose up -d --build --wait`, which only returns once
+   every healthcheck passes.
+3. **Verify** by running `./scripts/verify.sh` — the same script used locally. Any failed check
+   exits non-zero and fails the run.
+4. **Dump logs** from every container, only if something failed.
+5. **Tear down** with `docker compose down -v`, always.
+
+No secrets are stored in GitHub. The database in CI lives for about two minutes, so each run
+generates its own passwords and throws them away with the VM.
+
+Results are on the [Actions tab](https://github.com/santosh-kafle/multi_service_deployment/actions);
+the badge at the top of this README shows the latest run on `master`.
 
 ## Known limitations
 
@@ -280,7 +306,8 @@ Honest list of what isn't done yet:
 - **Nginx master processes run as root** in `web` and `proxy` (workers drop to the `nginx`
   user). `nginxinc/nginx-unprivileged` would remove that.
 - **No TLS.** The proxy serves plain HTTP on 8080.
-- **No CI.** `verify.sh` runs by hand, not on every push.
+- **CI, but no CD yet.** Every push is tested, but a passing run doesn't publish anything —
+  images are built on the runner and discarded. Nothing is deployed automatically.
 
 ## Local development without Docker
 

@@ -200,11 +200,47 @@ doesn't.
 
 ---
 
+## Continuous integration
+
+**CI runs the whole stack, not unit tests.** The workflow builds all five images, starts them,
+waits for every healthcheck, and runs `scripts/verify.sh` — the same script I run by hand. What
+I care about is that the containers work *together*, and that's only testable with all of them
+running.
+
+**GitHub-hosted runners, because I don't have a server.** Each run gets a fresh Ubuntu VM with
+Docker installed, which is thrown away afterwards. That's a better test than my own machine:
+it has no cached images, no leftover volumes, and no `.env`, so anything the stack silently
+depends on from my laptop shows up as a failure.
+
+**Two triggers: pushes to `master`, and pull requests.** The push trigger tells me whether
+`master` works. The pull-request trigger tests a branch *before* it's merged, so broken code
+never needs to reach `master` to be caught.
+
+**CI generates its own passwords instead of using GitHub secrets.** The database in CI exists
+for about two minutes and is destroyed with the VM. A random password made on the spot does the
+job, and a stored secret would just be one more credential that could leak. The step copies
+`.env.example` and fills each blank password with `openssl rand -hex 24` via `sed`.
+
+**The `.env` step checks its own output.** `sed` exits successfully even when it matches
+nothing, so a misspelled or renamed variable would leave a password empty while the step still
+showed green, and the run would fail later somewhere unrelated. Two `grep -q` lines confirm each
+password is exactly 48 hex characters. `grep` exits non-zero when it finds nothing, and GitHub
+runs each step with `bash -e`, so a missing password stops the run at the step that caused it.
+
+**Logs on failure, teardown always.** A failed step normally skips everything after it. The
+log dump runs under `if: failure()`, so a red run shows me what every container said, and the
+teardown runs under `if: always()`, so it happens regardless of the result.
+
+---
+
 ## Still to do
 
 - [ ] **Ship logs off the host.** Rotation bounds the disk, but history is still deleted on
       rotation and lost entirely when containers are removed.
-- [ ] **CI.** Run `scripts/verify.sh` against a freshly built stack on every push.
+- [x] **CI.** `scripts/verify.sh` runs against a freshly built stack on every push and pull
+      request.
+- [ ] **CD: publish images.** After a green run on `master`, push `api`, `web` and `proxy` to
+      GitHub Container Registry, tagged with the commit SHA, from the same job that tested them.
 - [ ] **Docker secrets** instead of environment variables, so credentials stay out of
       `docker inspect`. Mongo supports this via `_FILE` variables; Redis would need a wrapper.
 - [ ] **A dedicated Mongo user for the API**, with `readWrite` on `appdb` only, instead of root.
