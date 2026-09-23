@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env
+        run: |
+          cp .env.example .env 
+          sed -i "s/^MONGO_ROOT_PASSWORD=$/MONGO_ROOT_PASSWORD=$(openssl rand -hex 24)/" .env
+          sed -i "s/^REDIS_PASSWORD=$/REDIS_PASSWORD=$(openssl rand -hex 24)/" .env
+          grep -q '^MONGO_ROOT_PASSWORD=[0-9a-f]\{48\}$' .env
+          grep -q '^REDIS_PASSWORD=[0-9a-f]\{48\}$' .env
+
+      - name: Build and start
+        run: docker compose up -d --build --wait
+
+      - name: Verify
+        run: ./scripts/verify.sh
+
+      - name: Dump logs
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
