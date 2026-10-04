@@ -9,10 +9,11 @@ Project brief: <https://roadmap.sh/projects/multiservice-docker>
 
 ## Images and builds
 
-**`node:20-alpine` as the base image.** Alpine's base layer is about 5MB, against 100MB+ for
-the Debian variants. The API image lands at 218MB, and most of that is Node itself plus
-`node_modules`. Alpine uses musl instead of glibc, which can matter for packages with native
-bindings. None of mine have any, so the smaller image costs me nothing.
+**`node:22-alpine` as the base image.** Node 22 is an LTS line; I moved off 20 when it reached
+end of life in April 2026 and stopped getting security fixes. Alpine's base layer is about 5MB,
+against 100MB+ for the Debian variants. The API image lands at about 266MB, and most of that is
+Node itself plus `node_modules`. Alpine uses musl instead of glibc, which can matter for
+packages with native bindings. None of mine have any, so the smaller image costs me nothing.
 
 **`npm ci`, not `npm install`.** `npm install` treats `package-lock.json` as a suggestion: if
 `package.json` allows a newer version, it installs that and rewrites the lockfile. Inside a
@@ -36,10 +37,10 @@ PID 1, and the signal lands where it's handled.
 **Multi-stage build for the frontend.** Building React needs Node, npm, Vite and esbuild.
 *Serving* it needs only a web server, because the compiled JavaScript runs in the user's
 browser, not in my container. Stage one builds; stage two starts from `nginx:1.27-alpine` and
-copies only `dist/` across. The result is 75MB against 218MB for the API, with none of the build
+copies only `dist/` across. The result is 75MB against 266MB for the API, with none of the build
 tooling shipped.
 
-**Pinned image tags.** `mongo:7`, `redis:8`, `nginx:1.27-alpine`, `node:20-alpine`. Never
+**Pinned image tags.** `mongo:7`, `redis:8`, `nginx:1.27-alpine`, `node:22-alpine`. Never
 `latest`, which is a moving pointer that can jump a major version between two builds and break
 the stack without any change on my side.
 

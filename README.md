@@ -214,7 +214,7 @@ an item to see it fall back to Mongo.
 Full reasoning is in [`NOTES.md`](NOTES.md).
 
 - **Multi-stage build for the frontend** — build tooling (Vite, esbuild, `node_modules`) stays
-  in stage one. The runtime image carries only compiled static files: **75MB vs 218MB** for the
+  in stage one. The runtime image carries only compiled static files: **75MB vs 266MB** for the
   API.
 - **Layer ordering for cache efficiency** — dependency manifests are copied and installed
   before application source, so a code change doesn't trigger a reinstall.
@@ -352,3 +352,7 @@ Honest list of what isn't done yet:
 cd api && npm install && npm run dev   # needs MONGO_URL and REDIS_URL pointing at running instances
 cd web && npm install && npm run dev   # Vite dev server proxies /api to localhost:4000
 ```
+
+## License
+
+[MIT](LICENSE)
