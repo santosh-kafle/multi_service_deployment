@@ -15,10 +15,11 @@ fi
 cp .env.example .env
 chmod 600 .env
 sed -i "s/^MONGO_ROOT_PASSWORD=$/MONGO_ROOT_PASSWORD=$(openssl rand -hex 24)/" .env
+sed -i "s/^MONGO_APP_PASSWORD=$/MONGO_APP_PASSWORD=$(openssl rand -hex 24)/" .env
 sed -i "s/^REDIS_PASSWORD=$/REDIS_PASSWORD=$(openssl rand -hex 24)/" .env
 
-# sed succeeds even when it matches nothing, so confirm both passwords were actually filled in.
-for var in MONGO_ROOT_PASSWORD REDIS_PASSWORD; do
+# sed succeeds even when it matches nothing, so confirm every password was actually filled in.
+for var in MONGO_ROOT_PASSWORD MONGO_APP_PASSWORD REDIS_PASSWORD; do
   if ! grep -q "^$var=[0-9a-f]\{48\}$" .env; then
     echo "$var was not generated — check its name in .env.example" >&2
     rm .env
