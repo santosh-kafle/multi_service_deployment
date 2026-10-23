@@ -21,7 +21,7 @@ services:
     environment:
       - NODE_ENV=${NODE_ENV}
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
-      - MONGO_URL=mongodb://${MONGO_ROOT_USERNAME}:${MONGO_ROOT_PASSWORD}@mongo:27017/${MONGO_DB}?authSource=admin
+      - MONGO_URL=mongodb://${MONGO_APP_USERNAME}:${MONGO_APP_PASSWORD}@mongo:27017/${MONGO_DB}
       - MONGO_DB=${MONGO_DB}
       - PORT=${PORT}
       - CACHE_TTL_SECONDS=${CACHE_TTL_SECONDS}
@@ -32,8 +32,12 @@ services:
     environment:
       - MONGO_INITDB_ROOT_USERNAME=${MONGO_ROOT_USERNAME}
       - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD}
+      - MONGO_DB=${MONGO_DB}
+      - MONGO_APP_USERNAME=${MONGO_APP_USERNAME}
+      - MONGO_APP_PASSWORD=${MONGO_APP_PASSWORD}
     volumes:
         - db_data:/data/db
+        - ./mongo/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "mongosh --quiet -u \"$$MONGO_INITDB_ROOT_USERNAME\" -p \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval \"db.adminCommand('ping').ok\""]
       interval: 10s
