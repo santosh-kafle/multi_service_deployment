@@ -153,16 +153,24 @@ left blank. With one file, a password can't drift out of sync between two copies
 
 **Each container gets only what it uses.** Compose reads `.env` to fill in `${...}`, but no
 container receives the whole file. Redis gets its own password and nothing else. Mongo gets its
-root credentials. The API gets exactly the variables `config.js` reads, plus `NODE_ENV`. If one
+root credentials, plus the app user it has to create. The API gets exactly the variables `config.js` reads, plus `NODE_ENV`. If one
 service were compromised, it wouldn't hand over the credentials for the others.
 
 **Connection strings are built in Compose, not stored.** The API reads `MONGO_URL` and
 `REDIS_URL`, and Compose assembles them from the username and password in `.env`. Storing
 complete URLs would mean each password existed twice in the same file.
 
-**`authSource=admin` in the Mongo URL.** The root user is created in Mongo's `admin` database,
-while the app works in `appdb`. Without this, the driver would try to authenticate against
-`appdb` and fail.
+**The API connects as its own Mongo user, not root.** Root can drop any database, create users
+and shut the server down; the API only needs to read and write `appdb`. So on first start,
+`mongo/init/create-app-user.js` creates an `app` user inside `appdb` with `readWrite` on that
+database and nothing else. I checked that it gets `Unauthorized` on another database, on the
+user list and on `dropDatabase`. Root stays in the Mongo container for the healthcheck and for
+admin work. Because the user lives in `appdb`, the URL no longer needs `authSource=admin`.
+
+**The user is created by a script the image runs, not by the API.** The `mongo` image runs
+anything in `/docker-entrypoint-initdb.d/` once, as root, on an empty data directory, so I mount
+`mongo/init/` there read-only. The script reads the name and password from its environment,
+so no secret is written into the repo.
 
 **Passwords are 48 hex characters, from `openssl rand -hex 24`.** Hex can't contain `@`, `:`,
 `/`, `?` or `#`, all of which have meaning inside a URL and would break a connection string
@@ -291,7 +299,7 @@ automatically, so the registry file only applies when passed with `-f`. `IMAGE_T
 - [ ] **Resolve the `npm audit` warning** in the API's dependencies (one moderate advisory).
 - [ ] **Docker secrets** instead of environment variables, so credentials stay out of
       `docker inspect`. Mongo supports this via `_FILE` variables; Redis would need a wrapper.
-- [ ] **A dedicated Mongo user for the API**, with `readWrite` on `appdb` only, instead of root.
+- [x] **A dedicated Mongo user for the API**, with `readWrite` on `appdb` only, instead of root.
 - [ ] **Unprivileged Nginx** (`nginxinc/nginx-unprivileged`) for `web` and `proxy`.
 - [ ] Minor: `ENV NODE_ENV=production` in the API Dockerfile so the image is correct even
       without Compose; `--from=build` instead of `--from=0` in the web Dockerfile.

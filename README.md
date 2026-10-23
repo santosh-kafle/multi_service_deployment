@@ -61,10 +61,12 @@ only the variables it actually uses.
 
 | Variable | Used by | Purpose |
 |---|---|---|
-| `MONGO_ROOT_USERNAME` | mongo, api | Root user created on Mongo's first start |
-| `MONGO_ROOT_PASSWORD` | mongo, api | Its password |
+| `MONGO_ROOT_USERNAME` | mongo | Root user created on Mongo's first start, for admin work only |
+| `MONGO_ROOT_PASSWORD` | mongo | Its password |
+| `MONGO_APP_USERNAME` | mongo, api | User the API connects as, with `readWrite` on `appdb` only |
+| `MONGO_APP_PASSWORD` | mongo, api | Its password |
 | `REDIS_PASSWORD` | redis, api | Passed to `redis-server --requirepass` |
-| `MONGO_DB` | api | Database the app reads and writes (`appdb`) |
+| `MONGO_DB` | mongo, api | Database the app reads and writes (`appdb`) |
 | `CACHE_TTL_SECONDS` | api | Lifetime of cached responses |
 | `PORT` | api | Port Express listens on inside the network |
 | `NODE_ENV` | api | `production` — no stack traces in error responses |
@@ -73,16 +75,17 @@ The API never receives the raw passwords as separate variables. Compose builds i
 strings from the parts above:
 
 ```
-MONGO_URL = mongodb://<user>:<password>@mongo:27017/appdb?authSource=admin
+MONGO_URL = mongodb://<app user>:<password>@mongo:27017/appdb
 REDIS_URL = redis://:<password>@redis:6379
 ```
 
-`authSource=admin` is needed because the root user lives in Mongo's `admin` database while the
-app works in `appdb`. Passwords are generated as hex so they never contain URL-reserved
-characters like `@`, `:` or `/`.
+The API never gets the root credentials. On Mongo's first start, `mongo/init/create-app-user.js`
+creates the app user inside `appdb` with `readWrite` on that database only, so the URL needs no
+`authSource`. Passwords are generated as hex so they never contain URL-reserved characters like
+`@`, `:` or `/`.
 
-> **Mongo reads `MONGO_ROOT_*` only when its data volume is empty.** Changing the password in
-> `.env` after the first start has no effect on the existing user. See
+> **Mongo creates both users only when its data volume is empty.** Changing either password in
+> `.env` after the first start has no effect on the existing users. See
 > [Rotating passwords](#rotating-passwords).
 
 ## Services
@@ -250,6 +253,16 @@ docker compose exec mongo sh -c 'mongosh --quiet \
   -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin \
   --eval "db.getSiblingDB(\"admin\").changeUserPassword(\"$MONGO_INITDB_ROOT_USERNAME\", \"NEW_PASSWORD\")"'
 # put NEW_PASSWORD in .env as MONGO_ROOT_PASSWORD, then:
+docker compose up -d --force-recreate --wait
+```
+
+The app user works the same way, still logged in as root, but the user lives in `appdb`:
+
+```bash
+docker compose exec mongo sh -c 'mongosh --quiet \
+  -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin \
+  --eval "db.getSiblingDB(\"$MONGO_DB\").changeUserPassword(\"$MONGO_APP_USERNAME\", \"NEW_PASSWORD\")"'
+# put NEW_PASSWORD in .env as MONGO_APP_PASSWORD, then:
 docker compose up -d --force-recreate --wait
 ```
 
