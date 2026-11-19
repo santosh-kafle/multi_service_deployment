@@ -36,13 +36,19 @@ PID 1, and the signal lands where it's handled.
 
 **Multi-stage build for the frontend.** Building React needs Node, npm, Vite and esbuild.
 *Serving* it needs only a web server, because the compiled JavaScript runs in the user's
-browser, not in my container. Stage one builds; stage two starts from `nginx:1.27-alpine` and
-copies only `dist/` across. The result is 75MB against 266MB for the API, with none of the build
+browser, not in my container. Stage one builds; stage two starts from `nginx:1.30-alpine` and
+copies only `dist/` across. The result is 94MB against 266MB for the API, with none of the build
 tooling shipped.
 
-**Pinned image tags.** `mongo:7`, `redis:8`, `nginx:1.27-alpine`, `node:22-alpine`. Never
+**Pinned image tags.** `mongo:7`, `redis:8`, `nginx:1.30-alpine`, `node:22-alpine`. Never
 `latest`, which is a moving pointer that can jump a major version between two builds and break
 the stack without any change on my side.
+
+**Nginx on the stable 1.30 line.** I moved off `1.27`, which no longer gets fixes, when the
+November 2026 advisories landed (CVE-2026-123007 and others, fixed in 1.30.7). My listeners are
+plain HTTP on port 80 with no HTTP/2, so the worst of them weren't reachable here, but an
+unsupported version gets no fixes for whatever comes next. I pin the minor version, not the
+patch, so a rebuild picks up new security releases on the same branch without changing behaviour.
 
 ---
 
